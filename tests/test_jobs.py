@@ -153,3 +153,71 @@ def test_one_certificate_failure_does_not_stop_the_others(client, valid_payload,
     assert job["succeeded"] == 2
     assert job["failed"] == 1    
 
+
+
+def _submit(client, payload):
+    response = client.post("/jobs", json=payload)
+    job_id = response.json()["job_id"]
+    job = client.get(f"/jobs/{job_id}").json()
+    return job_id, job
+
+
+def test_download_single_certificate(client, valid_payload):
+    job_id, job = _submit(client, valid_payload)
+    cert_id = job["certificates"][0]["id"]
+
+    response = client.get(f"/jobs/{job_id}/certificates/{cert_id}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.content.startswith(b"%PDF")
+
+
+def test_download_all_as_zip(client, valid_payload):
+    import io
+    import zipfile
+
+    job_id, _ = _submit(client, valid_payload)
+
+    response = client.get(f"/jobs/{job_id}/download")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        names = zf.namelist()
+        assert len(names) == 2
+        assert all(name.endswith(".pdf") for name in names)
+
+
+def test_failed_certificate_has_no_file(client, valid_payload):
+    valid_payload["recipients"] = [
+        {"name": "Good Person", "email": "good@example.com"},
+        {"name": "Bad Person", "email": "nope"},
+    ]
+    job_id, job = _submit(client, valid_payload)
+    failed = next(c for c in job["certificates"] if c["status"] == "FAILED")
+
+    response = client.get(f"/jobs/{job_id}/certificates/{failed['id']}")
+
+    assert response.status_code == 404
+
+
+def test_zip_contains_only_successful_certificates(client, valid_payload):
+    import io
+    import zipfile
+
+    valid_payload["recipients"].append({"name": "Bad Person", "email": "nope"})
+    job_id, _ = _submit(client, valid_payload)
+
+    response = client.get(f"/jobs/{job_id}/download")
+
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        assert len(zf.namelist()) == 2
+
+
+def test_download_unknown_ids_return_404(client, valid_payload):
+    job_id, _ = _submit(client, valid_payload)
+
+    assert client.get(f"/jobs/{job_id}/certificates/99999").status_code == 404
+    assert client.get("/jobs/99999/download").status_code == 404
+
