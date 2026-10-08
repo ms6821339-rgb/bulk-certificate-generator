@@ -155,3 +155,51 @@ Failed recipients have no file, so requesting their certificate returns `404`.
 - **Accepted, but that recipient is marked `FAILED` with a reason:** blank name, name over 200 characters, invalid email, or a duplicate email in the same job.
 
 
+## Design decisions
+
+### Why FastAPI
+FastAPI validates requests automatically using Pydantic, generates interactive API docs at `/docs`, and keeps endpoint code short. This made the request validation and the API contract explicit and easy to test.
+
+### Why background processing
+A single request can contain thousands of recipients. Generating thousands of PDFs inside one HTTP request would keep the client waiting, risk timeouts, and tie up the server.
+
+So `POST /jobs` only validates the request, saves the job and its recipients, and returns `202 Accepted` with a job ID. The certificates are generated afterwards by a background task (FastAPI `BackgroundTasks`). The client polls `GET /jobs/{id}` to follow progress.
+
+**Trade-off:** `BackgroundTasks` needs no extra infrastructure, which keeps the project easy to run. But the work runs inside the web server process, so a job that is mid-run when the server restarts is not resumed. See "Limitations" below for the production alternative.
+
+### Two layers of validation
+1. **Request-level (Pydantic schema):** problems with the request as a whole, such as a missing `event_name`, an empty recipient list, or more than the allowed number of recipients, are rejected with `422` and nothing is saved.
+2. **Recipient-level (processor):** problems with a single recipient, such as a blank name, an invalid email, or a duplicate email, do **not** reject the request. The job is accepted, and that recipient is marked `FAILED` with a clear reason.
+
+The recipient schema is deliberately permissive. If it were strict, one bad row in a list of thousands would reject the entire request, which goes against the requirement that one invalid recipient must not block the others.
+
+### Failure isolation
+The processor handles recipients one at a time:
+- Invalid recipients are recorded as `FAILED` with a reason, and the loop continues.
+- Certificate generation for each recipient is wrapped in its own `try/except`, so a rendering error on one certificate is recorded on that recipient and the rest are still generated.
+- An outer `try/except` marks the whole job `FAILED` if something unexpected breaks the entire run, so a job is never left stuck in `PROCESSING`.
+
+Progress is committed after every recipient, so `GET /jobs/{id}` shows live counts while a large job is running.
+
+### Database design
+Two tables:
+- `jobs`: the shared details (event name, issuer, date), the status, and the counters (`total`, `succeeded`, `failed`).
+- `certificates`: one row per recipient, linked to its job, holding that recipient's status, file path and error message.
+
+The shared details are stored once on the job rather than repeated for each recipient. The counters are stored on the job so the status endpoint can report progress without counting rows each time. Recipients with invalid data are still stored (their name and email columns allow empty values) so the failure can be recorded and reported.
+
+SQLAlchemy is used as the ORM, so the same models run on SQLite (default, zero setup) or PostgreSQL by setting `DATABASE_URL`.
+
+### Models vs schemas
+SQLAlchemy models describe how data is stored. Pydantic schemas describe what the API accepts and returns. They are kept separate so the API can change without changing storage, and so internal fields such as file paths are never exposed to clients.
+
+### Certificate generation
+Certificates are PDFs drawn with ReportLab from a single fixed layout. ReportLab is pure Python, so there are no system dependencies to install. Each job's files are stored in their own folder (`generated/job_<id>/`).
+
+### Filename safety
+The recipient's name is part of the output filename. Names are sanitised (only letters, digits, `-` and `_` are kept) and each file name is prefixed with the certificate ID. This prevents a name like `../../secret` from writing outside the output folder, and prevents two people with the same name from overwriting each other's file.
+
+### Testability
+The processor calls the generator through its module, so tests can replace it with a fake that fails for one chosen recipient. This is how the "one failure does not stop the others" behaviour is tested. Tests run against a temporary database and output folder.
+
+
