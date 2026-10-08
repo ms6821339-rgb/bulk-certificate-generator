@@ -53,3 +53,66 @@ def test_invalid_recipients_are_marked_failed_with_reason(client, valid_payload)
     assert results[""]["error_message"] == "Name is required"
     assert results["No Email"]["error_message"] == "Invalid email address"
     assert results["Asha Again"]["error_message"] == "Duplicate email in this job"
+
+
+
+def test_certificate_pdf_is_generated(client, valid_payload):
+    from pathlib import Path
+
+    from app.database import SessionLocal
+    from app.models import Certificate
+
+    response = client.post("/jobs", json=valid_payload)
+    job_id = response.json()["job_id"]
+
+    db = SessionLocal()
+    try:
+        certs = db.query(Certificate).filter(Certificate.job_id == job_id).all()
+        assert len(certs) == 2
+        for cert in certs:
+            assert cert.status == "SUCCESS"
+            path = Path(cert.file_path)
+            assert path.exists()
+            assert path.read_bytes().startswith(b"%PDF")
+    finally:
+        db.close()
+
+
+def test_job_status_all_successful(client, valid_payload):
+    response = client.post("/jobs", json=valid_payload)
+    job = client.get(f"/jobs/{response.json()['job_id']}").json()
+
+    assert job["status"] == "COMPLETED"
+    assert job["total"] == 2
+    assert job["succeeded"] == 2
+    assert job["failed"] == 0
+    assert job["finished_at"] is not None
+
+
+def test_job_status_with_some_failures(client, valid_payload):
+    valid_payload["recipients"].append({"name": "Bad Email", "email": "nope"})
+
+    response = client.post("/jobs", json=valid_payload)
+    job = client.get(f"/jobs/{response.json()['job_id']}").json()
+
+    assert job["status"] == "COMPLETED_WITH_ERRORS"
+    assert job["total"] == 3
+    assert job["succeeded"] == 2
+    assert job["failed"] == 1
+
+
+def test_job_status_all_failed(client, valid_payload):
+    valid_payload["recipients"] = [{"name": "Bad", "email": "nope"}]
+
+    response = client.post("/jobs", json=valid_payload)
+    job = client.get(f"/jobs/{response.json()['job_id']}").json()
+
+    assert job["status"] == "FAILED"
+    assert job["succeeded"] == 0
+    assert job["failed"] == 1
+
+
+def test_unknown_job_returns_404(client):
+    response = client.get("/jobs/99999")
+
+    assert response.status_code == 404    
