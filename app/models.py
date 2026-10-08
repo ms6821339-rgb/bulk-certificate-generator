@@ -26,8 +26,8 @@ class Certificate(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False, index=True)
-    recipient_name = Column(String(200), nullable=True)
-    recipient_email = Column(String(320), nullable=True)
+    recipient_name = Column(Text, nullable=True)
+    recipient_email = Column(Text, nullable=True)
     status = Column(String(20), nullable=False, default="PENDING")
     file_path = Column(String(500), nullable=True)
     error_message = Column(Text, nullable=True)
